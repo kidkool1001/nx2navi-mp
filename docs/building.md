@@ -258,7 +258,9 @@ A `--cpu v2` build passes the same differential tests with `--cflags=-march=x86-
 too, so they check the software fma the v2 build links rather than the C runtime's.
 
 Runtime probes, each a mode of `nx2navi.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,
-`--probe-vkexec`, `--probe-nvn-tex` and `--probe-shader` cover most runtime changes. `--probe-shader` and the draw
+`--probe-vkexec`, `--probe-nvn-tex` and `--probe-shader` cover most runtime changes; a change to the multiplayer
+session (`runtime/multiplayer.c`) passes `--probe-mp`, which needs no game files and covers the packet codecs, the
+frame transform, a loopback host and client session, LAN discovery and the camera projection. `--probe-shader` and the draw
 part of `--probe-vkexec` translate shaders of the census below: they look for `build/<ver>/shaders/jobs.json` of the
 exe's own version first, then of the other one.
 
