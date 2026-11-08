@@ -263,6 +263,29 @@
 # The key of the application's uploaded art asset (Rich Presence > Art Assets) shown as the status's large image.
 # discord_image = nx2navi_512x512
 
+[multiplayer]
+# Multiplayer session mode: off, host (listen on mp_port and relay state between all connected players), or join
+# (connect to mp_host on mp_port). Changes while the game runs take effect at once, and the Multiplayer tab of the
+# settings menu (F1) controls all of these live. You can also run a standalone dedicated relay server without game
+# files via: nx2navi --mp-server
+# mp_mode = off
+# Server IPv4 address or hostname when mp_mode = join. Supports LAN auto-discovery from the Multiplayer tab.
+# mp_host = 127.0.0.1
+# UDP port for hosting or joining (1024 to 65535).
+# mp_port = 27015
+# Display name shown above your Link in other players' worlds.
+# mp_name = Link
+# Player accent colour for nametags, indicators and markers: green, blue, red, violet, gold or cyan.
+# mp_color = green
+# Show 3D world-projected player nametags, distance and off-screen directional arrows (1 = on, 0 = off).
+# mp_nametags = 1
+# Show the compact multiplayer session & player list overlay in the top-left corner while active (1 = on, 0 = off).
+# mp_hud = 1
+# Render remote players' animated 3D Link models in the game world (1 = on, 0 = off).
+# mp_render_players = 1
+# Remote player position and skeleton interpolation smoothing window in milliseconds (0 to 300; 0 = raw snapshots).
+# mp_interp_ms = 100
+
 [audio]
 # none mixes without opening an audio device.
 # audio = default
