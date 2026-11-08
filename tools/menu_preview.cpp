@@ -98,6 +98,7 @@ void mp_get_session_view(MpSessionView *out) {
     snprintf(out->local_name, sizeof out->local_name, "Link");
     out->local_color = MP_COLOR_GREEN, out->local_slot = 0, out->rtt_ms = 24;
     out->player_count = 3, out->remote_count = 2;
+    out->tx_bytes = 1284 * 1024, out->rx_bytes = 931 * 1024, out->re_emitted_draws = 18422;
     out->local_pos_valid = 1;
     MpPlayerView *p = &out->players[0];
     p->active = 1, p->is_local = 1, p->slot = 0, p->color_id = MP_COLOR_GREEN;

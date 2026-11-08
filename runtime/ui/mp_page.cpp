@@ -14,7 +14,6 @@
 #include <string.h>
 
 #include "imgui.h"
-#include "imgui_internal.h"   // IsPopupOpen
 
 #include "menu_sound.h"
 #include "ui/menu_skin.h"
@@ -71,36 +70,38 @@ static void format_distance(char *out, size_t cap, float m) {
     else snprintf(out, cap, "%.2f km", (double)m / 1000.0);
 }
 
-// A filled disc in a player's colour on the line the cursor is at, then the cursor past it.
-static void color_dot(uint8_t color) {
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float h = ImGui::GetTextLineHeight(), r = h * 0.24f;
-    dl->AddCircleFilled(ImVec2(p.x + r * 1.7f, p.y + h * 0.5f), r, ImGui::GetColorU32(accent(color)));
-    ImGui::Dummy(ImVec2(r * 3.6f, h));
-    ImGui::SameLine(0, 0);
+// A count of bytes as a short figure: 512 B, 12.4 KB, 3.1 MB.
+static void format_bytes(char *out, size_t cap, uint64_t n) {
+    if (n < 1024ull) snprintf(out, cap, "%u B", (unsigned)n);
+    else if (n < 1024ull * 1024) snprintf(out, cap, "%.1f KB", (double)n / 1024.0);
+    else snprintf(out, cap, "%.1f MB", (double)n / (1024.0 * 1024.0));
 }
 
-// ---- the roster: one line per player, and for a remote one the two things a player can do to it
+// The colour of a player on a row: a bar down the row's left edge, drawn over the box the row itself drew.
+static void color_bar(uint8_t color) {
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(a.x + 2, a.y + 4), ImVec2(a.x + 6, b.y - 4),
+                                              ImGui::GetColorU32(accent(color)), 2.0f);
+}
+
+// One player of the roster. The rows sit in the page's own column, so each shows its description beside the page as every
+// other row does: the local player's a text row with its name, slot, distance and bones, a remote player's the same with
+// Teleport and Beacon under it.
 static void roster_row(const MpPlayerView &p) {
-    ImGui::PushID((int)p.slot);
-    color_dot(p.color_id);
-    ImGui::TextUnformatted(p.name);
-    ImGui::SameLine();
-    if (p.is_local) ImGui::TextDisabled("%s", menu_text(UI_MENU_MP_YOU));
-    // the slot, the distance, the round trip and the bones in one column on the right, so none of them is cut off
-    char right[128], dist[32], bones[48];
+    char value[160], note[64], dist[32];
     format_distance(dist, sizeof dist, p.distance_m);
-    if (p.skel_bones) snprintf(bones, sizeof bones, "%u%s", (unsigned)p.skel_bones, menu_text(UI_MENU_MP_BONES));
-    else snprintf(bones, sizeof bones, "%s", menu_text(UI_MENU_MP_NO_SKELETON));
-    if (p.is_local) snprintf(right, sizeof right, "#%u  %s", (unsigned)p.slot, bones);
-    else if (p.ping_ms)
-        snprintf(right, sizeof right, "#%u  %s  %u ms  %s", (unsigned)p.slot, dist, (unsigned)p.ping_ms, bones);
-    else snprintf(right, sizeof right, "#%u  %s  %s", (unsigned)p.slot, dist, bones);
-    ImGui::SameLine();
-    float rx = ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(right).x;
-    if (rx > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + rx);
-    ImGui::TextDisabled("%s", right);
+    if (p.skel_bones) snprintf(note, sizeof note, "%u%s", (unsigned)p.skel_bones, menu_text(UI_MENU_MP_BONES));
+    else snprintf(note, sizeof note, "%s", menu_text(UI_MENU_MP_NO_SKELETON));
+    // the label is the player, the value the slot with how far away and how quick the player is
+    if (p.is_local) snprintf(value, sizeof value, "#%u", (unsigned)p.slot);
+    else if (p.ping_ms) snprintf(value, sizeof value, "#%u  %s  %u ms", (unsigned)p.slot, dist, (unsigned)p.ping_ms);
+    else snprintf(value, sizeof value, "#%u  %s", (unsigned)p.slot, dist);
+    char label[MP_NAME_MAX + 24];
+    snprintf(label, sizeof label, "%s%s%s", p.name, p.is_local ? " " : "",
+             p.is_local ? menu_text(UI_MENU_MP_YOU) : "");
+    ImGui::PushID((int)p.slot);
+    opt_text_row("##mp_player", label, value, note, menu_text(p.is_local ? UI_MENU_MP_YOU : UI_MENU_MP_ROSTER), false);
+    color_bar(p.color_id);
     if (!p.is_local) {
         float h = ImGui::GetFrameHeight(), gap = ImGui::GetStyle().ItemSpacing.x;
         float w = fmaxf((ImGui::GetContentRegionAvail().x - gap) * 0.5f, 1.0f);
@@ -113,41 +114,22 @@ static void roster_row(const MpPlayerView &p) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
             ImGui::SetItemTooltip("%s", menu_text(UI_MENU_MP_PING_DESC));
     }
-    ImGui::Separator();
     ImGui::PopID();
 }
 
-// The status line over the roster: the state, then the address or the port, the players and the round trip.
-static void status_line(const MpSessionView &v) {
-    ImVec4 col = v.status == MP_STATUS_ERROR      ? ImVec4(0.95f, 0.55f, 0.40f, 1)
-                 : v.status == MP_STATUS_HOSTING || v.status == MP_STATUS_CONNECTED ? ImVec4(0.58f, 0.88f, 0.54f, 1)
-                                                                                   : ImVec4(0.78f, 0.74f, 0.66f, 1);
-    ImGui::TextColored(col, "%s", status_text(v.status));
-    ImGui::SameLine();
+// The session's own line, above the roster: the state, the port or the address, the players and the round trip.
+static void status_row(const MpSessionView &v) {
+    char value[192];
     if (v.status == MP_STATUS_HOSTING)
-        ImGui::TextDisabled("%s %u  -  %d/%d  -  %s", menu_text(UI_MENU_MP_PORT), (unsigned)v.port, v.player_count,
-                            MP_MAX_PLAYERS, v.local_name);
+        snprintf(value, sizeof value, "%s  %s %u  %d/%d", status_text(v.status), menu_text(UI_MENU_MP_PORT),
+                 (unsigned)v.port, v.player_count, MP_MAX_PLAYERS);
     else if (v.status == MP_STATUS_CONNECTED)
-        ImGui::TextDisabled("%s  -  %d/%d  -  %u ms", v.host_addr, v.player_count, MP_MAX_PLAYERS, (unsigned)v.rtt_ms);
-    else if (v.status == MP_STATUS_ERROR && v.error[0]) ImGui::TextDisabled("%s", v.error);
-    else ImGui::TextDisabled("%s %u", menu_text(UI_MENU_MP_PORT), (unsigned)v.port);
-}
-
-static void roster_block(const MpSessionView &v) {
-    ImGui::BeginChild("##mp_roster", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
-    status_line(v);
-    if (v.status == MP_STATUS_OFF || v.status == MP_STATUS_ERROR) {
-        ImGui::TextWrapped("%s", menu_text(UI_MENU_MP_MODE_DESC));
-        if (v.status == MP_STATUS_ERROR && ImGui::Button(menu_text(UI_MENU_MP_RETRY))) mp_retry();
-    } else {
-        for (int i = 0; i < v.player_count; i++) roster_row(v.players[i]);
-        if (v.status == MP_STATUS_CONNECTING) {   // the join is still being answered: one line, until a slot arrives
-            ImGui::TextDisabled("%s...", menu_text(UI_MENU_MP_STATUS_CONNECTING));
-        }
-        if (v.re_emitted_draws)   // the draws repeated for the remote players, the price of seeing them
-            ImGui::TextDisabled("%s: %llu", menu_text(UI_MENU_MP_STATS), (unsigned long long)v.re_emitted_draws);
-    }
-    ImGui::EndChild();
+        snprintf(value, sizeof value, "%s  %s  %d/%d  %u ms", status_text(v.status), v.host_addr, v.player_count,
+                 MP_MAX_PLAYERS, (unsigned)v.rtt_ms);
+    else if (v.status == MP_STATUS_ERROR && v.error[0])
+        snprintf(value, sizeof value, "%s  %s", status_text(v.status), v.error);
+    else snprintf(value, sizeof value, "%s", status_text(v.status));
+    opt_text_row("##mp_status", menu_text(UI_MENU_MP_SESSION), value, NULL, menu_text(UI_MENU_MP_MODE_DESC), false);
 }
 
 // The LAN list: what the last discovery found, each host a press away from joining it.
@@ -324,9 +306,22 @@ void tab_mp(float scale) {
     opt_choice("NX2NAVI_MP_MODE", UI_MENU_MP_MODE, kModes, 3, UI_MENU_MP_MODE_DESC);
     text_row("NX2NAVI_MP_HOST", UI_MENU_MP_HOST, UI_MENU_MP_HOST_DESC, v.host_addr, FIELD_HOST);
     opt_slider("NX2NAVI_MP_PORT", UI_MENU_MP_PORT, 1024, 65535, UI_MENU_MP_PORT_DESC, 1, "%.0f");
-    if (v.status == MP_STATUS_ERROR && opt_button("##mp_retry", UI_MENU_MP_RETRY, UI_MENU_MP_MODE_DESC)) mp_retry();
-    opt_text(UI_MENU_MP_ROSTER);
-    roster_block(v);
+    opt_group(UI_MENU_MP_ROSTER);
+    status_row(v);
+    if (v.status == MP_STATUS_OFF || v.status == MP_STATUS_ERROR) {
+        opt_text(UI_MENU_MP_MODE_DESC);
+        if (v.status == MP_STATUS_ERROR && opt_button("##mp_retry", UI_MENU_MP_RETRY, UI_MENU_MP_MODE_DESC)) mp_retry();
+    } else {
+        for (int i = 0; i < v.player_count; i++) roster_row(v.players[i]);
+        if (v.status == MP_STATUS_CONNECTING) opt_text(UI_MENU_MP_STATUS_CONNECTING);   // until the host's welcome
+        // what the session has sent and received, and the draws it repeated for the remote players
+        char up[32], down[32], value[128];
+        format_bytes(up, sizeof up, v.tx_bytes), format_bytes(down, sizeof down, v.rx_bytes);
+        snprintf(value, sizeof value, "%s / %s", up, down);
+        char note[64];
+        snprintf(note, sizeof note, "%llu", (unsigned long long)v.re_emitted_draws);
+        opt_text_row("##mp_traffic", menu_text(UI_MENU_MP_STATS), value, note, menu_text(UI_MENU_MP_STATS_DESC), false);
+    }
     opt_group(UI_MENU_MP_LAN);
     lan_block(v);
 
