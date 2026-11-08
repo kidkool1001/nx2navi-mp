@@ -273,7 +273,9 @@ typedef enum {
     UI_MENU_MP_STATUS_CONNECTED, UI_MENU_MP_STATUS_ERROR,
     UI_MENU_MP_STATS, UI_MENU_MP_STATS_DESC,
     UI_MENU_MP_TYPE, UI_MENU_MP_TYPE_HINT, UI_MENU_MP_ERASE, UI_MENU_MP_CLEAR,
-    UI_TEXT_COUNT
+    UI_TEXT_COUNT,
+    // The Multiplayer tab's ids, which ov_probe.c probes in each of the menu's four languages besides UI_MENU_LAST_ID.
+    UI_MENU_MP_LAST_ID = UI_TEXT_COUNT - 1
 } UiTextId;
 
 // Bytes of the menu's description pane (ui/option_rows.cpp, struct Desc): a description plus the note appended to it

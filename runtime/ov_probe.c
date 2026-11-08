@@ -883,6 +883,17 @@ static void probe_menu_text(void) {
               "menu text id %d is too long for the description pane", id);
         CHECK(ui_text_defined("zh-Hans", (UiTextId)id), "menu text id %d lacks Simplified Chinese", id);
     }
+    // The Multiplayer tab's ids sit past UI_MENU_LAST_ID, so the loop above does not reach them: the same four texts.
+    for (int id = UI_MENU_TAB_MP; id <= UI_MENU_MP_LAST_ID; id++) {
+        CHECK(ui_text_defined("en", (UiTextId)id) && ui_text_defined("ru", (UiTextId)id) &&
+              ui_text_defined("pt-BR", (UiTextId)id) && ui_text_defined("zh-Hans", (UiTextId)id),
+              "Multiplayer text id %d lacks one of the menu's four languages", id);
+        CHECK(strlen(ui_text_in("en", (UiTextId)id)) + 256 < UI_DESC_BYTES &&
+              strlen(ui_text_in("ru", (UiTextId)id)) + 256 < UI_DESC_BYTES &&
+              strlen(ui_text_in("pt-BR", (UiTextId)id)) + 256 < UI_DESC_BYTES &&
+              strlen(ui_text_in("zh-Hans", (UiTextId)id)) + 256 < UI_DESC_BYTES,
+              "Multiplayer text id %d is too long for the description pane", id);
+    }
     CHECK(!ui_text_defined("en", UI_TEXT_COUNT) && !*ui_text_in("ru", UI_TEXT_COUNT), "an id past the catalog gives text");
     // other languages fall back to English for the menu, and keep their own keyboard texts
     CHECK(!strcmp(ui_text_in("ja", UI_MENU_CONTINUE), ui_text_in("en", UI_MENU_CONTINUE)), "ja menu text is not English");
