@@ -132,22 +132,23 @@ static void status_row(const MpSessionView &v) {
     opt_text_row("##mp_status", menu_text(UI_MENU_MP_SESSION), value, NULL, menu_text(UI_MENU_MP_MODE_DESC), false);
 }
 
-// The LAN list: what the last discovery found, each host a press away from joining it.
+// The LAN list: what the last discovery found, each host a row a press away from joining it. The scan is a row too, so it
+// says what it does in the description pane; a scan clears the list, so "none found" is only written before one.
 static void lan_block(const MpSessionView &v) {
-    if (ImGui::Button(menu_text(UI_MENU_MP_LAN_SCAN))) mp_request_lan_scan();
-    ImGui::SameLine();
+    ImGui::PushID("##mp_lan");
+    if (opt_button("##mp_lan_scan", UI_MENU_MP_LAN_SCAN, UI_MENU_MP_LAN_NONE)) mp_request_lan_scan();
     if (v.lan_count <= 0) {
-        ImGui::TextWrapped("%s", menu_text(UI_MENU_MP_LAN_NONE));
+        ImGui::PopID();
         return;
     }
     for (int i = 0; i < v.lan_count; i++) {
         const MpLanSession &s = v.lan_sessions[i];
+        char label[MP_NAME_MAX], value[160];
+        snprintf(label, sizeof label, "%s", s.host_name);
+        snprintf(value, sizeof value, "%s  %u/%u", s.host_ip, (unsigned)s.player_count, (unsigned)s.max_players);
         ImGui::PushID(i);
-        ImGui::Text("%s", s.host_name);
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s  %u/%u", s.host_ip, (unsigned)s.player_count, (unsigned)s.max_players);
-        ImGui::SameLine();
-        if (ImGui::SmallButton(menu_text(UI_MENU_MP_LAN_JOIN))) {   // the address and the port, then join it
+        if (opt_text_row("##mp_lan_host", label, value, NULL, menu_text(UI_MENU_MP_LAN_JOIN), false) == 2) {
+            // the address and the port, then a session on them: the mode is set last, so the session starts once
             char port[16];
             snprintf(port, sizeof port, "%u", (unsigned)s.port);
             opt_apply("NX2NAVI_MP_HOST", s.host_ip);
@@ -157,6 +158,7 @@ static void lan_block(const MpSessionView &v) {
         }
         ImGui::PopID();
     }
+    ImGui::PopID();
 }
 
 // ---- typing a text setting (the player's name, the host address)
