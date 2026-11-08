@@ -128,10 +128,8 @@ typedef struct {
 
 // ---- lifecycle
 void mp_init(void);                                   // main.c: starts the session thread (any time)
-void mp_frame_tick(void);                             // per presented frame: advances the interpolation
 int  mp_active(void);                                 // fast: a session is hosting or connected (replay thread)
-int  mp_has_remote_players(void);                     // ... with remote players, and 3D rendering enabled
-int  mp_overlay_wanted(void);                          // nametags or the mini-HUD is on
+int  mp_overlay_wanted(void);                         // nametags or the mini-HUD is on (the present path's overlay)
 void mp_retry(void);                                  // starts a failed session again (the menu's Retry row)
 
 // ---- state

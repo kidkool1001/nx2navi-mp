@@ -1272,22 +1272,12 @@ void mp_init(void) {
 
 int mp_active(void) { return __atomic_load_n(&g_active, __ATOMIC_ACQUIRE); }
 
-int mp_has_remote_players(void) {
-    return mp_active() && __atomic_load_n(&g_remote, __ATOMIC_RELAXED) > 0 && cfg_bool("NX2NAVI_MP_RENDER_PLAYERS");
-}
-
 int mp_overlay_wanted(void) { return __atomic_load_n(&g_overlay, __ATOMIC_RELAXED) && mp_active(); }
 
 void mp_retry(void) {
     plat_mutex_lock(&g_lock);
     if (G.mode != MP_MODE_OFF && G.status == MP_STATUS_ERROR) session_start(&G);
     plat_mutex_unlock(&g_lock);
-}
-
-void mp_frame_tick(void) {
-    // The session thread interpolates and ages the beacons; the present only notes that a frame happened (a hook for
-    // per-frame work the UI may want, kept cheap: two atomic loads).
-    (void)mp_active();
 }
 
 void mp_get_session_view(MpSessionView *out) {
