@@ -1452,6 +1452,8 @@ static void mat4_mul(const float a[16], const float b[16], float out[16]) {
 void mp_observe_camera_ubo(int slot, const void *data, uint32_t size) {
     (void)slot;
     if (!data) return;
+    // What the nametags use until the next accepted block, so vk_exec_draw.c hands over the scene's own block only: a
+    // shadow pass's camera would put every nametag where that pass saw it.
     const float *f = data;
     float vp[16], view[16] = {0};
     if (size >= 0x940) {          // 1.4.3's deferred pass: the view at 0, the view-projection at 0x30
@@ -1574,6 +1576,16 @@ int mp_vk_link_draw(uint64_t c5_addr, uint32_t c5_size, uint64_t c7_addr, uint32
     if (c5_model_space) *c5_model_space = model;
     if (!cfg_bool("NX2NAVI_MP_RENDER_PLAYERS")) return 0;
     uint32_t mask = __atomic_load_n(&g_peer_mask, __ATOMIC_ACQUIRE);
+    // A draw whose c5 is not a skeleton block the game builds (a static model's shape matrix sits in c5) is not Link's
+    // however near its c7 is, and repeating it would fill the remote player with that model: it has to look like bones.
+    // The cheap test first: the first matrix's translation is the model's origin (or the root bone's, model space).
+    if (L.skel_bones && nb) {
+        float t[3];
+        memcpy(t, local_bones + 3, sizeof t);   // floats 3, 7 and 11: the first kept matrix's translation
+        float d0 = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+        float dx = t[0] - link_pos[0], dy = t[1] - link_pos[1], dz = t[2] - link_pos[2];
+        if (d0 >= MP_LINK_RADIUS && sqrtf(dx * dx + dy * dy + dz * dz) >= MP_LINK_RADIUS) return 0;
+    } else if (!nb && L.skel_bones) return 0;   // the game's Link draws have bones by now: this one is another model
     int n = 0;
     for (int i = 0; i < MP_MAX_PLAYERS; i++)
         if (mask & (1u << i)) g_slot_pick[n++] = i;

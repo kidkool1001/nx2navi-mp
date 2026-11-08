@@ -2908,8 +2908,7 @@ static int draw_skipped(const VkExec *ex, int mesh, int why) {
 static struct {
     int ready;                        // the draw is one of Link's and players are waiting for it
     const VkPipeInfo *info;
-    int n;
-    int slots[8];
+    int n;                            // the players to draw it again for (their slots: mp_vk_remote_slot, at the repeat)
     int c5_model;                     // local c5's translations are model-space offsets
     uint8_t c5[MP_C5_MAX];            // local Link's skeleton block, as the draw binds it
     uint32_t c5_size;
@@ -2931,24 +2930,25 @@ static int mp_reads_slot(const VkPipeInfo *info, int index) {
 }
 
 // The scene camera, once a frame: 1.4.3's deferred pass binds c4 (0x940 bytes), Ocarina's c3 (0x3500 bytes).
+// Ocarina's c3 is the 0x3500-byte "scene" block every pass of the frame binds (shadow passes of other lights too), so
+// only the frame's first one is taken: it is the main camera's, and taking a later one would sway the nametags.
 static void mp_take_camera(VkExec *ex) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (f == mp_cam_frame) return;
-    mp_cam_frame = f;
     const p_bind_buf *c4 = &ex->ubo[NVN_STAGE_VS][4], *c3 = &ex->ubo[NVN_STAGE_VS][3];
     if (c4->addr && c4->size >= 0x940) {
         const uint8_t *p = vk_usnap_bytes(c4->addr, 0x940);
-        if (p) mp_observe_camera_ubo(4, p, 0x940);
+        if (p) mp_cam_frame = f, mp_observe_camera_ubo(4, p, 0x940);
     } else if (c3->addr && c3->size >= 0x3500) {
         const uint8_t *p = vk_usnap_bytes(c3->addr, 0x3500);
-        if (p) mp_observe_camera_ubo(3, p, 0x3500);
+        if (p) mp_cam_frame = f, mp_observe_camera_ubo(3, p, 0x3500);
     }
 }
 
 static void mp_draw_begin(VkExec *ex, const VkPipeInfo *info, int mesh, int32_t count) {
     MP.ready = 0, MP.info = info, MP.n = 0, MP.c5_size = 0, MP.have_c5 = MP.have_c7 = 0;
     if (mesh || count <= 0 || !mp_active()) return;
-    mp_take_camera(ex);
+    mp_take_camera(ex);   // before any test that returns: the camera is for the nametags, not only for Link's draws
     const p_bind_buf *c5 = &ex->ubo[NVN_STAGE_VS][5], *c7 = &ex->ubo[NVN_STAGE_VS][7];
     if (!c5->addr || c5->size < 48 || !c7->addr || c7->size < 48) return;
     MP.have_c5 = (uint8_t)mp_reads_slot(info, 5);
@@ -2956,7 +2956,7 @@ static void mp_draw_begin(VkExec *ex, const VkPipeInfo *info, int mesh, int32_t 
     if (!MP.have_c5 && !MP.have_c7) return;
     int n = mp_vk_link_draw(c5->addr, (uint32_t)c5->size, c7->addr, (uint32_t)c7->size, &MP.c5_model);
     if (n <= 0) return;
-    for (int i = 0; i < n && i < 8; i++) MP.slots[i] = mp_vk_remote_slot(i);
+    MP.n = n > 8 ? 8 : n;   // which players: the repeat asks again (mp_vk_remote_slot), the session may change meanwhile
     if (MP.have_c5) {   // the bones as this draw binds them
         MP.c5_size = (uint32_t)c5->size > sizeof MP.c5 ? (uint32_t)sizeof MP.c5 : (uint32_t)c5->size;
         const uint8_t *p = vk_usnap_bytes(c5->addr, MP.c5_size);
@@ -2968,7 +2968,6 @@ static void mp_draw_begin(VkExec *ex, const VkPipeInfo *info, int mesh, int32_t 
         if (p) memcpy(MP.c7, p, 48);
         else if (!plat_mem_read(c7->addr, MP.c7, 48)) return;
     }
-    MP.n = n > 8 ? 8 : n;
     MP.ready = 1;
 }
 
@@ -2995,11 +2994,16 @@ static void mp_build_remote(VkExec *ex, int slot) {
 static void mp_repeat(VkExec *ex, int indexed, uint32_t index_count, uint32_t instance_count, uint32_t first_index,
                       int32_t vertex_offset, uint32_t first_vertex, uint32_t first_instance) {
     if (!MP.ready) return;
+    MP.ready = 0;   // this draw's own repeat happens once: a nested one (mvobj_draw never draws) would only repeat it
     for (int i = 0; i < MP.n; i++) {
-        if (MP.slots[i] < 0) continue;
+        int slot = mp_vk_remote_slot(i);
+        if (slot < 0) continue;
         memcpy(mp_ovr_save, mo_ovr, sizeof mo_ovr);
-        mp_build_remote(ex, MP.slots[i]);
+        mp_build_remote(ex, slot);
         mo_ovr_on = 1;
+        // The skip compares the game's own bind structs (bind_sig), and those are Link's for every copy: without this the
+        // second player would be drawn with the first one's blocks.
+        B.res_valid = 0;
         bind_resources(ex, MP.info);
         mo_ovr_on = 0;
         memcpy(mo_ovr, mp_ovr_save, sizeof mo_ovr);
