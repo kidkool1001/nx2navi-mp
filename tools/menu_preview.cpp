@@ -7,7 +7,7 @@
 // stands in for the game's either way.
 //
 // tools/menu_preview.py builds and runs it:
-//   menu_preview <font.ttf> <scene: menu | overlay | boot> <width> <height> <out.rgba> [art folder]
+//   menu_preview <font.ttf> <scene: menu | mp | text | hud | overlay | boot> <width> <height> <out.rgba> [art folder]
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -22,6 +22,7 @@
 #include "imgui_internal.h"
 
 #include "ui/menu_art.h"
+#include "ui/mp_page.h"
 #include "ui/menu_skin.h"
 #include "ui/option_rows.h"
 #include "ui/perf_panel.h"
@@ -29,6 +30,7 @@
 extern "C" {
 #include "cfg.h"
 #include "menu_sound.h"
+#include "multiplayer.h"
 #include "ui_text.h"
 }
 
@@ -40,6 +42,10 @@ static const CfgMeta kMeta[] = {
     {"GAME_ASPECT", "16:9", "16:9|window|21:9|32:9", 0}, {"RENDER_SCALE", "", NULL, 0},
     {"UPSCALER", "bilinear", "bilinear|fsr", 0},         {"SHARPNESS", "50", "0..100", 1},
     {"ASPECT", "fit", "fit|stretch", 1}, {"MENU_LANG", "", NULL, 1},
+    {"MP_MODE", "host", "off|host|join", 1}, {"MP_HOST", "127.0.0.1", NULL, 1},
+    {"MP_PORT", "27015", "1024..65535", 1},  {"MP_NAME", "Link", NULL, 1},
+    {"MP_COLOR", "green", "green|blue|red|violet|gold|cyan", 1}, {"MP_NAMETAGS", "1", "0|1", 1},
+    {"MP_HUD", "1", "0|1", 1}, {"MP_RENDER_PLAYERS", "1", "0|1", 1}, {"MP_INTERP_MS", "100", "0..300", 1},
 };
 static const struct { const char *key, *value; } kSet[] = {{"VK_PRESENT", "mailbox"}, {"PERF_OVERLAY", "full"}};
 
@@ -83,6 +89,68 @@ uint64_t plat_now_ns(void) {
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 void rt_log(const char *, ...) {}
+
+// multiplayer.c's snapshot (multiplayer.h): a session of three, for the Multiplayer tab and the overlay
+void mp_get_session_view(MpSessionView *out) {
+    memset(out, 0, sizeof *out);
+    out->mode = MP_MODE_HOST, out->status = MP_STATUS_HOSTING, out->port = 27015;
+    snprintf(out->host_addr, sizeof out->host_addr, "192.168.1.24");
+    snprintf(out->local_name, sizeof out->local_name, "Link");
+    out->local_color = MP_COLOR_GREEN, out->local_slot = 0, out->rtt_ms = 24;
+    out->player_count = 3, out->remote_count = 2;
+    out->local_pos_valid = 1;
+    MpPlayerView *p = &out->players[0];
+    p->active = 1, p->is_local = 1, p->slot = 0, p->color_id = MP_COLOR_GREEN;
+    snprintf(p->name, sizeof p->name, "Link");
+    p->skel_bones = 96;
+    p = &out->players[1];
+    p->active = 1, p->slot = 1, p->color_id = MP_COLOR_CYAN, p->ping_ms = 31, p->distance_m = 12.4f, p->skel_bones = 96;
+    snprintf(p->name, sizeof p->name, "Navi");
+    p->pos[0] = 3.0f, p->pos[1] = 0.2f, p->pos[2] = -11.0f;
+    p = &out->players[2];
+    p->active = 1, p->slot = 2, p->color_id = MP_COLOR_VIOLET, p->ping_ms = 58, p->distance_m = 240.7f, p->skel_bones = 48;
+    snprintf(p->name, sizeof p->name, "Saria");
+    p->pos[0] = -90.0f, p->pos[1] = 1.5f, p->pos[2] = 220.0f;
+    out->beacon_count = 1;
+    MpBeaconView *b = &out->beacons[0];
+    b->active = 1, b->slot = 1, b->color_id = MP_COLOR_CYAN, b->age_s = 1.5f, b->duration_s = 8.0f;
+    snprintf(b->sender, sizeof b->sender, "Navi");
+    out->lan_count = 2;
+    snprintf(out->lan_sessions[0].host_ip, 64, "192.168.1.24"), out->lan_sessions[0].port = 27015;
+    snprintf(out->lan_sessions[0].host_name, MP_NAME_MAX, "Zelda");
+    out->lan_sessions[0].player_count = 3, out->lan_sessions[0].max_players = 8;
+    snprintf(out->lan_sessions[1].host_ip, 64, "192.168.1.31"), out->lan_sessions[1].port = 27015;
+    snprintf(out->lan_sessions[1].host_name, MP_NAME_MAX, "Impa");
+    out->lan_sessions[1].player_count = 1, out->lan_sessions[1].max_players = 4;
+}
+int mp_active(void) { return 1; }
+int menu_is_open(void) { return 0; }
+void mp_retry(void) {}
+void mp_request_lan_scan(void) {}
+int mp_send_beacon(void) { return 1; }
+int mp_teleport_to_slot(int) { return 1; }
+int mp_teleport_to_pos(const float *) { return 1; }
+int mp_overlay_wanted(void) { return 1; }
+void mp_color_rgba(uint8_t id, float rgba[4]) {
+    static const float k[6][3] = {{0.35f, 0.85f, 0.40f}, {0.36f, 0.62f, 0.98f}, {0.95f, 0.36f, 0.32f},
+                                  {0.72f, 0.45f, 0.95f}, {0.96f, 0.80f, 0.30f}, {0.35f, 0.90f, 0.92f}};
+    int i = id < 6 ? id : 0;
+    rgba[0] = k[i][0], rgba[1] = k[i][1], rgba[2] = k[i][2], rgba[3] = 1;
+}
+// the scene camera: straight down -Z, looking at the origin (the players of the snapshot are around it)
+int mp_project_world_to_screen(const float world[3], float *u, float *v, float *cw) {
+    float z = 24.0f - world[2];   // in front of the camera when positive
+    if (z < 0.1f) {   // behind it: off screen, the arrow's direction
+        if (u) *u = world[0] < 0 ? 0.02f : 0.98f;
+        if (v) *v = 0.5f;
+        if (cw) *cw = z;
+        return 1;
+    }
+    if (u) *u = 0.5f + world[0] * 0.06f;
+    if (v) *v = 0.55f - world[1] * 0.10f;
+    if (cw) *cw = z;
+    return 1;
+}
 }
 
 // ---- the game's art, from files menu_preview.py decoded: NN.art, a width and a height (32-bit) and the RGBA pixels of
@@ -241,6 +309,93 @@ static void scene_menu(float w, float h, float scale, ImFont *title, bool first)
     ImGui::End();
 }
 
+// The Multiplayer tab (ui/mp_page.cpp), laid out as menu.cpp lays out a tab: the tab bar, the page's rows and its
+// window-less blocks, the bottom row.
+static void scene_mp(float w, float h, float scale, ImFont *title) {
+    backdrop(w, h);
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), IM_COL32(10, 6, 2, 150));
+    float ww = fminf(w * 0.88f, 1400 * scale), wh = fminf(h * 0.86f, 820 * scale);
+    ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
+    ImTextureID frame_tex;
+    const bool framed = menu_art(MENU_ART_FRAME_DECO, &frame_tex, nullptr, nullptr);
+    if (framed) ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::Begin("##menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+    if (framed) ImGui::PopStyleVar();
+    const ImVec2 win_p = ImGui::GetWindowPos(), win_s = ImGui::GetWindowSize();
+    if (framed) {
+        ImDrawList *fdl = ImGui::GetWindowDrawList();
+        const float ox = 15 * scale, oy = 30 * scale;
+        fdl->PushClipRectFullScreen();
+        for (int turned = 0; turned < 2; turned++)
+            menu_art_draw9_turned(fdl, MENU_ART_FRAME_DECO, ImVec2(win_p.x - ox, win_p.y - oy),
+                                  ImVec2(win_p.x + win_s.x + ox, win_p.y + win_s.y + oy), 96 * scale, 0.2f,
+                                  IM_COL32(236, 196, 112, 235), 0, turned);
+        fdl->PopClipRect();
+    }
+    const ImVec4 gold(0.93f, 0.76f, 0.38f, 1);
+    ImGui::PushFont(title);
+    ImGui::TextColored(gold, "Ocarina of Time");
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    ImGui::TextUnformatted(menu_text(UI_MENU_TITLE));
+    ImGui::PopFont();
+    const ImGuiStyle &st = ImGui::GetStyle();
+    float bottom = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2;
+    static const UiTextId tabs[] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS,
+                                    UI_MENU_TAB_MP};
+    if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
+        for (int k = 0; k < 5; k++) {
+            char label[96];
+            snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(tabs[k]), k);
+            bool shown = skin_tab_item(label, menu_text(tabs[k]), k == 4 ? ImGuiTabItemFlags_SetSelected : 0, scale, title);
+            if (!shown) continue;
+            ImGui::Spacing();
+            opt_reserve_bottom(bottom);
+            tab_mp(scale);
+            mp_page_after();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    const char *cont = menu_text(UI_MENU_CONTINUE), *restart = menu_text(UI_MENU_RESTART_YES), *quit = menu_text(UI_MENU_QUIT);
+    float bw = fmaxf(fmaxf(ImGui::CalcTextSize(cont).x, ImGui::CalcTextSize(restart).x), ImGui::CalcTextSize(quit).x) + st.FramePadding.x * 4;
+    float gap = st.ItemSpacing.x + skin_cursor_reach(scale), y = ImGui::GetCursorPosY();
+    ImGui::SetCursorPos(ImVec2(fmaxf(st.WindowPadding.x, ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 3 - gap * 2), y));
+    skin_widget_button(cont, ImVec2(bw, 0), scale);
+    ImGui::SameLine(0, gap);
+    skin_widget_button(restart, ImVec2(bw, 0), scale);
+    ImGui::SameLine(0, gap);
+    skin_widget_button(quit, ImVec2(bw, 0), scale);
+    ImGui::End();
+}
+
+// The Multiplayer tab's text window (ui/mp_page.cpp edit_window), open on the player's name.
+static void scene_text(float w, float h, float scale, ImFont *title) {
+    scene_mp(w, h, scale, title);
+    // the window is a popup of the page's own window in the menu; here a silent host window stands in for it
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1, 1));
+    ImGui::Begin("##host", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
+                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    mp_open_field(1);
+    mp_page_after();
+    ImGui::End();
+}
+
+// The multiplayer overlay over a game picture (ui/mp_page.cpp mp_overlay_draw): nametags, an off-screen arrow, a beacon
+// and the mini-HUD.
+static void scene_hud(float w, float h, float scale) {
+    backdrop(w, h);
+    const float pic[4] = {0.05f, 0.08f, 0.9f, 0.84f};   // letterboxed, as a 16:10 window shows a 16:9 picture
+    ImDrawList *bg = ImGui::GetBackgroundDrawList();
+    bg->AddRectFilled(ImVec2(pic[0] * w, pic[1] * h), ImVec2((pic[0] + pic[2]) * w, (pic[1] + pic[3]) * h),
+                      IM_COL32(70, 96, 66, 255));
+    mp_overlay_draw(w, h, scale, pic);
+}
+
 static void scene_overlay(float w, float h, float scale) {
     backdrop(w, h);
     static PerfPanel p;   // the numbers of the screenshot the overlay was redesigned from
@@ -386,7 +541,7 @@ static void raster(const ImDrawData *dd, Image &img, const uint8_t *atlas, int a
 
 int main(int argc, char **argv) {
     if (argc != 6 && argc != 7) {
-        fprintf(stderr, "usage: %s <font.ttf> <menu|overlay|boot> <width> <height> <out.rgba> [art folder]\n", argv[0]);
+        fprintf(stderr, "usage: %s <font.ttf> <menu|mp|text|hud|overlay|boot> <width> <height> <out.rgba> [art folder]\n", argv[0]);
         return 2;
     }
     const char *font = argv[1], *scene = argv[2], *out = argv[5];
@@ -415,6 +570,9 @@ int main(int argc, char **argv) {
         ImGui::NewFrame();
         if (!strcmp(scene, "menu")) scene_menu((float)w, (float)h, scale, title, frame == 0);
         else if (!strcmp(scene, "boot")) scene_boot((float)w, (float)h, scale, title);
+        else if (!strcmp(scene, "mp")) scene_mp((float)w, (float)h, scale, title);
+        else if (!strcmp(scene, "hud")) scene_hud((float)w, (float)h, scale);
+        else if (!strcmp(scene, "text")) scene_text((float)w, (float)h, scale, title);
         else scene_overlay((float)w, (float)h, scale);
         ImGui::Render();
     }

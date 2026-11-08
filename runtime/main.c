@@ -10,6 +10,9 @@
 //     --probe-gfx-abi   NVN object layouts against nvn.h's reserved sizes; needs no game files
 //     --probe-nvn, --probe-nvn-tex, --probe-window, --probe-shader, --probe-vkmem, --probe-vkexec    graphics probes
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
+//     --probe-mp        the multiplayer codecs, transform math, a loopback host and client session and the camera
+//                       projection; needs no game files
+//     --mp-server[=PORT]  a dedicated multiplayer relay host on PORT (default NX2NAVI_MP_PORT) until the process ends
 //     --probe-movie     host VP9 movie::Decoder on one RomFS movie; skips without game data
 //     --boot            run the game to the first NVN call
 //     --seconds S       run the game (implies --boot's start-up) until the world clock (game time since the loaded
@@ -27,6 +30,7 @@
 
 #include "cfg.h"
 #include "host.h"
+#include "multiplayer.h"
 #include "platform/platform.h"
 #include "sha256.h"
 
@@ -475,8 +479,9 @@ static int usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR] [--profile DIR] [--selftest | --probe-loader | "
                     "--probe-cfg | --probe-dpi | --probe-mods | --probe-kernel | --probe-ipc | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-vkmem | "
-                    "--probe-vkexec | --probe-astc | --probe-movie | --probe-crash-call | --probe-crash-null | --probe-discord | "
-                    "--prepare-shaders | --warm-shaders | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--probe-vkexec | --probe-astc | --probe-movie | --probe-mp | --mp-server[=PORT] | --probe-crash-call | "
+                    "--probe-crash-null | --probe-discord | --prepare-shaders | --warm-shaders | --boot |"
+                    "--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -572,6 +577,7 @@ int main(int argc, char **argv) {
     if (!mode) {
         cfg.boot = cfg.seconds > 0;   // --seconds starts the game like --boot, with its checkpoints
         discord_init();   // the Rich Presence thread (discord_rpc.c); it reads nx2navi.ini itself and idles while off
+        mp_init();        // the multiplayer session thread (multiplayer.c): idle until MP_MODE is host or join
         rt_boot();
         return 0;
     }
@@ -599,8 +605,13 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-astc")) return probe_astc();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
     if (!strcmp(mode, "--probe-movie")) return probe_movie();
+    if (!strcmp(mode, "--probe-mp")) return probe_mp();
+    if (!strncmp(mode, "--mp-server", 11)) {   // a dedicated relay host; --mp-server=PORT picks the port
+        const char *port = mode[11] == '=' ? mode + 12 : NULL;
+        return mp_run_dedicated_server(port ? (uint16_t)atoi(port) : 0);
+    }
     if (!strcmp(mode, "--prepare-shaders")) return vk_pipeline_prepare_shaders();
     if (!strcmp(mode, "--warm-shaders")) return vk_pipeline_warm_shaders();
-    if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
+    if (!strcmp(mode, "--boot")) { cfg.boot = 1; mp_init(); rt_boot(); return 0; }
     return usage(argv[0]);
 }

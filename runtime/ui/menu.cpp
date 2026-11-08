@@ -35,6 +35,7 @@ static int g_font_bad;
 #include "ui/menu_skin.h"
 #pragma clang diagnostic pop
 #include "ui/amiibo_page.h"
+#include "ui/mp_page.h"
 #include "ui/binds_page.h"
 #include "ui/option_rows.h"
 #include "ui/perf_panel.h"
@@ -69,6 +70,8 @@ int frame_free_running(void);
 extern const int rt_game_version;
 extern const char rt_port_version[];
 void cheats_frame(uint64_t frame);   // cheats.c
+int gfx_picture_rect(float out[4]);  // gfx_present.c: where the last present put the game's picture in the image
+int mp_overlay_wanted(void);         // multiplayer.c: the multiplayer overlay (nametags or the mini-HUD) is on
 bool tab_cheats(float scale);        // ui/cheats_tab.cpp; true: restart into the rebuild
 }
 
@@ -122,7 +125,7 @@ extern "C" void menu_toggle(void) {
 }
 
 // ---- events from the window adapter, queued while the menu is open; the present path hands them to ImGui
-enum { EV_KEY, EV_POS, EV_BUTTON, EV_WHEEL, EV_FOCUS, EV_MAX = 256 };
+enum { EV_KEY, EV_POS, EV_BUTTON, EV_WHEEL, EV_FOCUS, EV_CHAR, EV_MAX = 256 };
 struct Ev { int type, a, b; float x, y; };
 static Ev ev_q[EV_MAX];
 
@@ -145,6 +148,10 @@ extern "C" void menu_event_mouse_pos(float x, float y) { push({EV_POS, 0, 0, x, 
 extern "C" void menu_event_mouse_button(int button, int down) { push({EV_BUTTON, button, down, 0, 0}); }
 extern "C" void menu_event_wheel(float dx, float dy) { push({EV_WHEEL, 0, 0, dx, dy}); }
 extern "C" void menu_event_focus(int focused) { push({EV_FOCUS, focused, 0, 0, 0}); }
+extern "C" void menu_event_char(unsigned cp, int down) {
+    if (!down || cp < 0x20 || (cp >= 0xd800 && cp < 0xe000)) return;   // a key going up, a control code, half a surrogate
+    push({EV_CHAR, (int)cp, 1, 0, 0});
+}
 
 static void drain_events(ImGuiIO &io) {
     Ev q[EV_MAX];
@@ -166,6 +173,7 @@ static void drain_events(ImGuiIO &io) {
         case EV_BUTTON: io.AddMouseButtonEvent(e.a, e.b != 0); break;
         case EV_WHEEL: io.AddMouseWheelEvent(e.x, e.y); break;
         case EV_FOCUS: io.AddFocusEvent(e.a != 0); break;
+        case EV_CHAR: io.AddInputCharacter((unsigned)e.a); break;
         }
     }
 }
@@ -485,7 +493,7 @@ extern "C" void menu_vk_release(void) {
 // NX2NAVI_MENU_TEST_SET=<frame>:<key>=<value>[,<key>=<value>...][;<frame>:...]: cfg_set of each key (NX2NAVI_ prefix
 // optional) at that presented frame; changes live settings with no input, menu open or not. nx2navi.ini is written only by
 // the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note).
-enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_COUNT };   // Ocarina of Time: the options this port has
+enum { TAB_SCREEN, TAB_GAME, TAB_SOUND, TAB_CONTROLS, TAB_MP, TAB_COUNT };   // Ocarina of Time: the options this port has
 enum { TEST_PAGE_FRAMES = 30, TEST_SETS = 16 };
 struct TestSet { uint64_t frame; char key[64], value[64]; };
 static struct {
@@ -1079,7 +1087,8 @@ static void tab_controls(float scale) {
     binds_after_page();
 }
 
-static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS};
+static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS,
+                                             UI_MENU_TAB_MP};
 static int g_tab;               // the tab shown
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
@@ -1165,7 +1174,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
         ImGui::TextDisabled("%s", version);
     }
 
-    int step = g_modal || binds_modal()                                                                  ? 0
+    int step = g_modal || binds_modal() || mp_modal()                                                    ? 0
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
                                                                                                          : 0;
@@ -1197,6 +1206,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
             case TAB_GAME: tab_game(scale); break;
             case TAB_SOUND: tab_sound(scale); break;
             case TAB_CONTROLS: tab_controls(scale); break;
+            case TAB_MP: tab_mp(scale); mp_page_after(); break;
             }
             ImGui::EndTabItem();
         }
@@ -1230,7 +1240,7 @@ static void layout_menu(uint32_t w, uint32_t h, float scale) {
     if (skin_widget_button(quit, ImVec2(bw, 0), scale)) g_confirm_quit = true, ImGui::OpenPopup("##confirm");
     restart_confirm(scale);
     menu_sounds_frame();
-    bool was_modal = g_modal || binds_modal();
+    bool was_modal = g_modal || binds_modal() || mp_modal();
     if (!was_modal && (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
         set_open(0);
     ImGui::End();
@@ -1369,7 +1379,17 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
     perf_panel_draw(&p, (float)t->width, scale);
 }
 
+// The multiplayer overlay (ui/mp_page.cpp): nametags, off-screen arrows, beacons and the session's mini-HUD over the
+// game's picture, drawn whichever way the menu is. It costs one atomic load while no session runs.
+static void mp_overlay(const MenuTarget *t, float scale) {
+    if (t->width < 2 || t->height < 2) return;
+    float pic[4] = {0, 0, 1, 1};
+    gfx_picture_rect(pic);
+    mp_overlay_draw((float)t->width, (float)t->height, scale, pic);
+}
+
 static void perf_draw(const MenuTarget *t, float scale) {
+    mp_overlay(t, scale);
     if (g_perf_mode == 2) return perf_full_draw(t, scale);
     float w = (float)t->width;
     if (!g_perf_mode || !g_perf_text[0]) return;
@@ -1413,7 +1433,8 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
             g_tab_request = 0;
             set_open(1);
             open = true;
-        } else if (!g_perf_mode) {
+        } else if (!g_perf_mode && !mp_overlay_wanted()) {
+            // nothing of the menu's is drawn: the overlay (the multiplayer nametags and mini-HUD) alone keeps ImGui going
             return 0;
         }
     }
@@ -1447,6 +1468,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         io.ClearInputKeys();
         io.ClearInputMouse();
         binds_cancel();          // a cell waiting for a press when the menu closed: no press binds on the next opening
+        mp_cancel();             // the same for the Multiplayer tab's text window
         g_sound_fresh = true;
         g_last_ns = 0;
         g_focus_page = g_tab_request >= 0 ? g_tab_request : g_tab;   // opening: the first row has the cursor

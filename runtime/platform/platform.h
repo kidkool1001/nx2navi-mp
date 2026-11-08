@@ -7,6 +7,11 @@
 #include <stdio.h>
 #include <time.h>
 
+// _Noreturn is C11's; C++ spells it [[noreturn]] (tools/menu_preview.py builds the menu with a C++ compiler)
+#ifdef __cplusplus
+#define _Noreturn [[noreturn]]
+#endif
+
 #if defined(__x86_64__) || defined(_M_X64)
 #include "fp_x86.h"
 #include <immintrin.h>
@@ -460,3 +465,29 @@ int plat_spawn(const char *const *argv, const char *cwd);
 // In a process plat_restart started: waits, at most timeout_ms, until the process that started it has exited. 1 after
 // the wait, -1 on timeout, 0 when there is nothing to wait for (not started by plat_restart, or that process is gone).
 int plat_restart_wait(uint32_t timeout_ms);
+
+// ---- UDP networking: non-blocking IPv4 datagram sockets for multiplayer (multiplayer.c)
+typedef struct PlatUdp PlatUdp;
+typedef struct {
+    uint32_t ip;     // IPv4 address in host byte order (e.g. 0x7f000001 for 127.0.0.1)
+    uint16_t port;   // UDP port in host byte order
+} PlatNetAddr;
+
+// Opens a non-blocking IPv4 UDP socket bound to port (0 = ephemeral OS port). With broadcast != 0, enables
+// SO_BROADCAST and SO_REUSEADDR (for LAN discovery). Returns NULL on failure.
+PlatUdp *plat_udp_open(uint16_t port, int broadcast);
+void plat_udp_close(PlatUdp *u);
+// Returns the local UDP port (host byte order) that u is bound to, or 0 on failure.
+uint16_t plat_udp_bound_port(PlatUdp *u);
+// Sends a datagram of len bytes to dst. Returns 1 when queued/sent, 0 on error or full buffer.
+int plat_udp_send(PlatUdp *u, PlatNetAddr dst, const void *buf, size_t len);
+// Receives the next datagram into buf (up to cap bytes), waiting at most wait_ms (0 = non-blocking poll).
+// Fills *src (if non-NULL) with the sender's address. Returns bytes received (> 0), 0 when no packet is ready,
+// or -1 on socket error.
+int plat_udp_recv(PlatUdp *u, void *buf, size_t cap, PlatNetAddr *src, uint32_t wait_ms);
+// Resolves an IPv4 dotted-quad or hostname ("127.0.0.1", "192.168.1.10:27015", "localhost") into *out.
+// Uses default_port when host_str has no ":port" suffix. Returns 1 on success, 0 on failure.
+int plat_udp_resolve(const char *host_str, uint16_t default_port, PlatNetAddr *out);
+// Formats addr as "a.b.c.d:port" into out.
+void plat_net_format(PlatNetAddr addr, char *out, size_t cap);
+

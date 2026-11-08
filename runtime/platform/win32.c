@@ -2,6 +2,8 @@
 // SRW locks and condition variables.
 #include <io.h>
 #include <stdio.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <bcrypt.h>
 #include <pdh.h>
@@ -1966,3 +1968,148 @@ int plat_restart_wait(uint32_t timeout_ms) {
     CloseHandle(h);
     return r;
 }
+
+// ---- UDP networking
+
+struct PlatUdp {
+    SOCKET s;
+};
+
+static void wsa_ensure(void) {
+    static volatile LONG init_state = 0;
+    if (InterlockedCompareExchange(&init_state, 1, 0) == 0) {
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+        InterlockedExchange(&init_state, 2);
+    } else {
+        while (InterlockedCompareExchange(&init_state, 2, 2) != 2) SwitchToThread();
+    }
+}
+
+PlatUdp *plat_udp_open(uint16_t port, int broadcast) {
+    wsa_ensure();
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return NULL;
+    u_long nonblock = 1;
+    ioctlsocket(s, FIONBIO, &nonblock);
+    BOOL one = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+    if (broadcast) setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char *)&one, sizeof one);
+    int rcvbuf = 512 * 1024, sndbuf = 512 * 1024;
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char *)&rcvbuf, sizeof rcvbuf);
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char *)&sndbuf, sizeof sndbuf);
+    #ifndef SIO_UDP_CONNRESET
+    #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+    #endif
+    BOOL new_behav = FALSE;
+    DWORD bytes_ret = 0;
+    WSAIoctl(s, SIO_UDP_CONNRESET, &new_behav, sizeof new_behav, NULL, 0, &bytes_ret, NULL, NULL);
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+    if (bind(s, (const struct sockaddr *)&sa, sizeof sa) == SOCKET_ERROR) {
+        closesocket(s);
+        return NULL;
+    }
+    PlatUdp *u = calloc(1, sizeof *u);
+    if (!u) {
+        closesocket(s);
+        return NULL;
+    }
+    u->s = s;
+    return u;
+}
+
+void plat_udp_close(PlatUdp *u) {
+    if (!u) return;
+    if (u->s != INVALID_SOCKET) closesocket(u->s);
+    free(u);
+}
+
+uint16_t plat_udp_bound_port(PlatUdp *u) {
+    if (!u || u->s == INVALID_SOCKET) return 0;
+    struct sockaddr_in sa;
+    int sl = sizeof sa;
+    if (getsockname(u->s, (struct sockaddr *)&sa, &sl) == SOCKET_ERROR) return 0;
+    return ntohs(sa.sin_port);
+}
+
+int plat_udp_send(PlatUdp *u, PlatNetAddr dst, const void *buf, size_t len) {
+    if (!u || u->s == INVALID_SOCKET || !buf || !len) return 0;
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(dst.port),
+        .sin_addr.s_addr = htonl(dst.ip),
+    };
+    int r = sendto(u->s, (const char *)buf, (int)len, 0, (const struct sockaddr *)&sa, sizeof sa);
+    return r == (int)len;
+}
+
+int plat_udp_recv(PlatUdp *u, void *buf, size_t cap, PlatNetAddr *src, uint32_t wait_ms) {
+    if (!u || u->s == INVALID_SOCKET || !buf || !cap) return -1;
+    if (wait_ms > 0) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(u->s, &rfds);
+        struct timeval tv = {.tv_sec = (long)(wait_ms / 1000), .tv_usec = (long)((wait_ms % 1000) * 1000)};
+        int sr = select(0, &rfds, NULL, NULL, &tv);
+        if (sr <= 0) return sr < 0 ? -1 : 0;
+    }
+    struct sockaddr_in sa;
+    int sl = sizeof sa;
+    int r = recvfrom(u->s, (char *)buf, (int)cap, 0, (struct sockaddr *)&sa, &sl);
+    if (r == SOCKET_ERROR) {
+        int e = WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAECONNRESET || e == WSAEINTR) return 0;
+        return -1;
+    }
+    if (src) {
+        src->ip = ntohl(sa.sin_addr.s_addr);
+        src->port = ntohs(sa.sin_port);
+    }
+    return r;
+}
+
+int plat_udp_resolve(const char *host_str, uint16_t default_port, PlatNetAddr *out) {
+    if (!host_str || !*host_str || !out) return 0;
+    wsa_ensure();
+    char host[256];
+    uint16_t port = default_port;
+    while (*host_str == ' ' || *host_str == '\t') host_str++;
+    const char *colon = strrchr(host_str, ':');
+    size_t hlen = colon ? (size_t)(colon - host_str) : strlen(host_str);
+    while (hlen && (host_str[hlen - 1] == ' ' || host_str[hlen - 1] == '\t')) hlen--;
+    if (!hlen || hlen >= sizeof host) return 0;
+    memcpy(host, host_str, hlen);
+    host[hlen] = 0;
+    if (colon && colon[1]) {
+        char *end = NULL;
+        unsigned long p = strtoul(colon + 1, &end, 10);
+        if (end == colon + 1 || (*end && *end != ' ' && *end != '\t') || p == 0 || p > 65535) return 0;
+        port = (uint16_t)p;
+    }
+    struct in_addr ina;
+    if (inet_pton(AF_INET, host, &ina) == 1) {
+        out->ip = ntohl(ina.s_addr);
+        out->port = port;
+        return 1;
+    }
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return 0;
+    struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+    out->ip = ntohl(sa->sin_addr.s_addr);
+    out->port = port;
+    freeaddrinfo(res);
+    return 1;
+}
+
+void plat_net_format(PlatNetAddr addr, char *out, size_t cap) {
+    if (!out || !cap) return;
+    snprintf(out, cap, "%u.%u.%u.%u:%u",
+             (addr.ip >> 24) & 0xffu, (addr.ip >> 16) & 0xffu,
+             (addr.ip >> 8) & 0xffu, addr.ip & 0xffu, (unsigned)addr.port);
+}
+

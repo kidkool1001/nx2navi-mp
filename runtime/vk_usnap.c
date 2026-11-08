@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "host.h"
+#include "multiplayer.h"
 #include "nvn_api.h"
 #include "vk.h"
 #include "vk_dlaa.h"
@@ -283,7 +284,7 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     if (!U.nreg) return;
     if (!(U.arena = arena_get(total))) return;
     uint8_t *dst = U.arena->map;
-    if (vk_dlaa_available()) {
+    if (vk_dlaa_available() || mp_active()) {
         if (!U.arena->cpu && !(U.arena->cpu = malloc(U.arena->size))) rt_fatal("vk_usnap: out of memory");
         dst = U.arena->cpu;
     }

@@ -31,6 +31,7 @@
 #include "vk_gpa.h"
 #include "platform/platform.h"
 #include "vk_dlaa.h"
+#include "multiplayer.h"
 
 #define MAX_BINDINGS 128
 #define MAX_DESC 1024
@@ -2897,6 +2898,119 @@ static int draw_skipped(const VkExec *ex, int mesh, int why) {
     return 0;
 }
 
+// ---- multiplayer: remote players (multiplayer.c)
+// A scene draw of local Link's is drawn again for every remote player, with that player's skeleton (c5) and world matrix
+// (c7) in place of Link's: the blocks are built in scratch memory (mp_build_remote) and bound through mo_ovr, the
+// per-object override mvobj_draw_ already uses. mp_draw_begin, at the end of prepare_draw_ex, asks multiplayer.c whether
+// this draw is one of Link's; op_draw and op_draw_idx call mp_repeat after recording the original, which sets the
+// overrides, rebuilds the descriptors and re-issues the same draw for each player.
+#define MP_C5_MAX (96 * 48)
+static struct {
+    int ready;                        // the draw is one of Link's and players are waiting for it
+    const VkPipeInfo *info;
+    int n;
+    int slots[8];
+    int c5_model;                     // local c5's translations are model-space offsets
+    uint8_t c5[MP_C5_MAX];            // local Link's skeleton block, as the draw binds it
+    uint32_t c5_size;
+    uint8_t c7[48];
+    int have_c5, have_c7;             // the vertex stage reads them
+} MP;
+static VkDescriptorBufferInfo mp_ovr_save[2][32];
+static uint64_t mp_cam_frame = ~0ull;   // the frame whose camera was taken, so it costs one lookup a frame
+
+// Does any binding of the pipeline's vertex stage read the uniform index? (the translator's cbuf slots are 3 and up)
+static int mp_reads_slot(const VkPipeInfo *info, int index) {
+    for (uint32_t i = 0; i < info->n_bindings; i++) {
+        const VkPipeBinding *b = &info->bindings[i];
+        if (b->stage != NVN_STAGE_VS || b->kind != GFX_RES_UBO || !b->res) continue;
+        int base = b->res->slot - 3, n = b->count ? b->count : 1;
+        if (index >= base && index < base + n) return 1;
+    }
+    return 0;
+}
+
+// The scene camera, once a frame: 1.4.3's deferred pass binds c4 (0x940 bytes), Ocarina's c3 (0x3500 bytes).
+static void mp_take_camera(VkExec *ex) {
+    uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (f == mp_cam_frame) return;
+    mp_cam_frame = f;
+    const p_bind_buf *c4 = &ex->ubo[NVN_STAGE_VS][4], *c3 = &ex->ubo[NVN_STAGE_VS][3];
+    if (c4->addr && c4->size >= 0x940) {
+        const uint8_t *p = vk_usnap_bytes(c4->addr, 0x940);
+        if (p) mp_observe_camera_ubo(4, p, 0x940);
+    } else if (c3->addr && c3->size >= 0x3500) {
+        const uint8_t *p = vk_usnap_bytes(c3->addr, 0x3500);
+        if (p) mp_observe_camera_ubo(3, p, 0x3500);
+    }
+}
+
+static void mp_draw_begin(VkExec *ex, const VkPipeInfo *info, int mesh, int32_t count) {
+    MP.ready = 0, MP.info = info, MP.n = 0, MP.c5_size = 0, MP.have_c5 = MP.have_c7 = 0;
+    if (mesh || count <= 0 || !mp_active()) return;
+    mp_take_camera(ex);
+    const p_bind_buf *c5 = &ex->ubo[NVN_STAGE_VS][5], *c7 = &ex->ubo[NVN_STAGE_VS][7];
+    if (!c5->addr || c5->size < 48 || !c7->addr || c7->size < 48) return;
+    MP.have_c5 = (uint8_t)mp_reads_slot(info, 5);
+    MP.have_c7 = (uint8_t)mp_reads_slot(info, 7);
+    if (!MP.have_c5 && !MP.have_c7) return;
+    int n = mp_vk_link_draw(c5->addr, (uint32_t)c5->size, c7->addr, (uint32_t)c7->size, &MP.c5_model);
+    if (n <= 0) return;
+    for (int i = 0; i < n && i < 8; i++) MP.slots[i] = mp_vk_remote_slot(i);
+    if (MP.have_c5) {   // the bones as this draw binds them
+        MP.c5_size = (uint32_t)c5->size > sizeof MP.c5 ? (uint32_t)sizeof MP.c5 : (uint32_t)c5->size;
+        const uint8_t *p = vk_usnap_bytes(c5->addr, MP.c5_size);
+        if (p) memcpy(MP.c5, p, MP.c5_size);
+        else if (!plat_mem_read(c5->addr, MP.c5, MP.c5_size)) return;
+    }
+    if (MP.have_c7) {
+        const uint8_t *p = vk_usnap_bytes(c7->addr, 48);
+        if (p) memcpy(MP.c7, p, 48);
+        else if (!plat_mem_read(c7->addr, MP.c7, 48)) return;
+    }
+    MP.n = n > 8 ? 8 : n;
+    MP.ready = 1;
+}
+
+// One player's copy of the draw: their blocks in place of Link's, the descriptors rebuilt around them.
+static void mp_build_remote(VkExec *ex, int slot) {
+    if (MP.have_c7) {
+        uint8_t out[48];
+        VkBuffer b;
+        VkDeviceSize o;
+        mp_vk_build_remote_ubos(slot, NULL, 0, NULL, MP.c7, 48, out, 0);
+        memcpy(scratch(ex, 48, &b, &o), out, 48);
+        mo_ovr[NVN_STAGE_VS][7] = (VkDescriptorBufferInfo){b, o, 48};
+    }
+    if (!MP.have_c5 || !MP.c5_size) return;
+    VkBuffer b;
+    VkDeviceSize o;
+    uint8_t *out = scratch(ex, MP.c5_size, &b, &o);
+    mp_vk_build_remote_ubos(slot, MP.c5, MP.c5_size, out, NULL, 0, NULL, MP.c5_model);
+    mo_ovr[NVN_STAGE_VS][5] = (VkDescriptorBufferInfo){b, o, MP.c5_size};
+}
+
+// The draw's copy for each player, right after the original: the same pipeline, pipeline state and vertex buffers
+// (which stay bound), the descriptors with the player's blocks.
+static void mp_repeat(VkExec *ex, int indexed, uint32_t index_count, uint32_t instance_count, uint32_t first_index,
+                      int32_t vertex_offset, uint32_t first_vertex, uint32_t first_instance) {
+    if (!MP.ready) return;
+    for (int i = 0; i < MP.n; i++) {
+        if (MP.slots[i] < 0) continue;
+        memcpy(mp_ovr_save, mo_ovr, sizeof mo_ovr);
+        mp_build_remote(ex, MP.slots[i]);
+        mo_ovr_on = 1;
+        bind_resources(ex, MP.info);
+        mo_ovr_on = 0;
+        memcpy(mo_ovr, mp_ovr_save, sizeof mo_ovr);
+        if (indexed) vkCmdDrawIndexed(ex->cb, index_count, instance_count, first_index, vertex_offset, first_instance);
+        else vkCmdDraw(ex->cb, index_count, instance_count, first_vertex, first_instance);
+        mp_vk_note_re_emitted(1);
+        ex->recorded++;
+    }
+    B.res_valid = 0;   // the sets hold the last player's blocks now: the next draw builds its own
+}
+
 // mesh: a mesh draw (op_draw_mesh): the program's mesh and task stages stand in for the vertex stage, and nothing
 // vertex-related (vertex buffers, motion vector bookkeeping of vertex shaders) is bound or noted.
 static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
@@ -3036,6 +3150,7 @@ static int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int
     if (vk_dump_armed && !mesh) vk_dump_draw(ex, &s, p, info);
     if (vk_hdr_track) vk_hdr_draw(ex, info);
     vk_exec_oq_draw(ex);
+    mp_draw_begin(ex, info, mesh, count);   // multiplayer.c: is this draw one of local Link's?
     DRS.issued[mesh]++;
     draw_stats_tick();
     return 1;
@@ -3927,6 +4042,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         bind_index(ex, ix, sizeof *ix * 6 * q, VK_INDEX_TYPE_UINT32);
         free(ix);
         vkCmdDrawIndexed(ex->cb, 6 * q, inst, 0, 0, (uint32_t)d->base_instance);
+        mp_repeat(ex, 1, 6 * q, inst, 0, 0, 0, (uint32_t)d->base_instance);
     } else if (d->prim == NVN_DRAW_PRIMITIVE_LINE_LOOP && n >= 2) {   // a strip that returns to its first vertex
         uint32_t *ix = malloc(sizeof *ix * (n + 1));
         if (!ix) rt_fatal("vk: out of memory");
@@ -3935,8 +4051,10 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         bind_index(ex, ix, sizeof *ix * (n + 1), VK_INDEX_TYPE_UINT32);
         free(ix);
         vkCmdDrawIndexed(ex->cb, n + 1, inst, 0, 0, (uint32_t)d->base_instance);
+        mp_repeat(ex, 1, n + 1, inst, 0, 0, 0, (uint32_t)d->base_instance);
     } else {
         vkCmdDraw(ex->cb, n, inst, first, (uint32_t)d->base_instance);
+        mp_repeat(ex, 0, n, inst, 0, 0, first, (uint32_t)d->base_instance);
     }
     ex->recorded++;
 }
@@ -3993,6 +4111,9 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     }
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
+    // the same draw for every remote player (multiplayer.c); byte indices were widened above and keep the draw's own
+    mp_repeat(ex, 1, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex, 0,
+              (uint32_t)d->base_instance);
     ex->recorded++;
     if (d->itype != NVN_INDEX_TYPE_UNSIGNED_BYTE) mvobj_draw(ex, d, sp.buffer, sp.offset);
 }

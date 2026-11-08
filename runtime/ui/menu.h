@@ -34,6 +34,9 @@ void menu_event_mouse_pos(float x, float y);
 void menu_event_mouse_button(int button, int down);   // 0 left, 1 right, 2 middle
 void menu_event_wheel(float dx, float dy);
 void menu_event_focus(int focused);
+// A character the keyboard typed (the window system's WM_CHAR / SDL_EVENT_TEXT_INPUT): the menu's text fields take them
+// as ImGui does not turn keys into text itself. down 0: the key went up, nothing to add.
+void menu_event_char(unsigned cp, int down);
 
 // ---- the overlay, drawn into the swapchain image after the game image (gfx_present.c, present lock held)
 typedef struct {

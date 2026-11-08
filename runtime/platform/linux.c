@@ -1,6 +1,7 @@
 // Linux implementation of platform.h: pthreads, CLOCK_MONOTONIC, futex locks and condition variables, POSIX files,
 // /proc and sysfs for the load counters, posix_spawn for child processes.
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -9,6 +10,8 @@
 #include <linux/fs.h>
 #include <linux/futex.h>
 #include <linux/userfaultfd.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -1917,3 +1920,123 @@ int plat_restart_wait(uint32_t timeout_ms) {
     close(fd);
     return r;
 }
+
+// ---- UDP networking
+
+struct PlatUdp {
+    int fd;
+};
+
+PlatUdp *plat_udp_open(uint16_t port, int broadcast) {
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_UDP);
+    if (fd < 0) return NULL;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (broadcast) setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
+    int rcvbuf = 512 * 1024, sndbuf = 512 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof sndbuf);
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+    };
+    if (bind(fd, (const struct sockaddr *)&sa, sizeof sa) < 0) {
+        close(fd);
+        return NULL;
+    }
+    PlatUdp *u = calloc(1, sizeof *u);
+    if (!u) {
+        close(fd);
+        return NULL;
+    }
+    u->fd = fd;
+    return u;
+}
+
+void plat_udp_close(PlatUdp *u) {
+    if (!u) return;
+    if (u->fd >= 0) close(u->fd);
+    free(u);
+}
+
+uint16_t plat_udp_bound_port(PlatUdp *u) {
+    if (!u || u->fd < 0) return 0;
+    struct sockaddr_in sa;
+    socklen_t sl = sizeof sa;
+    if (getsockname(u->fd, (struct sockaddr *)&sa, &sl) < 0) return 0;
+    return ntohs(sa.sin_port);
+}
+
+int plat_udp_send(PlatUdp *u, PlatNetAddr dst, const void *buf, size_t len) {
+    if (!u || u->fd < 0 || !buf || !len) return 0;
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(dst.port),
+        .sin_addr.s_addr = htonl(dst.ip),
+    };
+    ssize_t r = sendto(u->fd, buf, len, MSG_DONTWAIT, (const struct sockaddr *)&sa, sizeof sa);
+    return r == (ssize_t)len;
+}
+
+int plat_udp_recv(PlatUdp *u, void *buf, size_t cap, PlatNetAddr *src, uint32_t wait_ms) {
+    if (!u || u->fd < 0 || !buf || !cap) return -1;
+    if (wait_ms > 0) {
+        struct pollfd p = {.fd = u->fd, .events = POLLIN};
+        int pr = poll(&p, 1, (int)wait_ms);
+        if (pr <= 0) return pr < 0 && errno != EINTR ? -1 : 0;
+    }
+    struct sockaddr_in sa;
+    socklen_t sl = sizeof sa;
+    ssize_t r = recvfrom(u->fd, buf, cap, MSG_DONTWAIT, (struct sockaddr *)&sa, &sl);
+    if (r < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ECONNREFUSED) return 0;
+        return -1;
+    }
+    if (src) {
+        src->ip = ntohl(sa.sin_addr.s_addr);
+        src->port = ntohs(sa.sin_port);
+    }
+    return (int)r;
+}
+
+int plat_udp_resolve(const char *host_str, uint16_t default_port, PlatNetAddr *out) {
+    if (!host_str || !*host_str || !out) return 0;
+    char host[256];
+    uint16_t port = default_port;
+    while (*host_str == ' ' || *host_str == '\t') host_str++;
+    const char *colon = strrchr(host_str, ':');
+    size_t hlen = colon ? (size_t)(colon - host_str) : strlen(host_str);
+    while (hlen && (host_str[hlen - 1] == ' ' || host_str[hlen - 1] == '\t')) hlen--;
+    if (!hlen || hlen >= sizeof host) return 0;
+    memcpy(host, host_str, hlen);
+    host[hlen] = 0;
+    if (colon && colon[1]) {
+        char *end = NULL;
+        unsigned long p = strtoul(colon + 1, &end, 10);
+        if (end == colon + 1 || (*end && *end != ' ' && *end != '\t') || p == 0 || p > 65535) return 0;
+        port = (uint16_t)p;
+    }
+    struct in_addr ina;
+    if (inet_pton(AF_INET, host, &ina) == 1) {
+        out->ip = ntohl(ina.s_addr);
+        out->port = port;
+        return 1;
+    }
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return 0;
+    struct sockaddr_in *sa = (struct sockaddr_in *)res->ai_addr;
+    out->ip = ntohl(sa->sin_addr.s_addr);
+    out->port = port;
+    freeaddrinfo(res);
+    return 1;
+}
+
+void plat_net_format(PlatNetAddr addr, char *out, size_t cap) {
+    if (!out || !cap) return;
+    snprintf(out, cap, "%u.%u.%u.%u:%u",
+             (addr.ip >> 24) & 0xffu, (addr.ip >> 16) & 0xffu,
+             (addr.ip >> 8) & 0xffu, addr.ip & 0xffu, (unsigned)addr.port);
+}
+

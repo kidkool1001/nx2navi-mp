@@ -39,8 +39,42 @@ static ImGuiKey key_of(SDL_Scancode sc) {
     }
 }
 
+// A typed UTF-8 sequence to the menu's characters (menu_event_char): ImGui does not make text of keys itself, and the
+// Multiplayer tab's text window takes what the keyboard types.
+static void io_add_text(const char *s) {
+    if (!s || !menu_is_open()) return;
+    for (const unsigned char *p = (const unsigned char *)s; *p;) {
+        unsigned cp, n = *p < 0x80 ? 1 : (*p & 0xe0) == 0xc0 ? 2 : (*p & 0xf0) == 0xe0 ? 3 : (*p & 0xf8) == 0xf0 ? 4 : 0;
+        if (!n) { p++; continue; }
+        cp = n == 1 ? *p : n == 2 ? (unsigned)(*p & 0x1f) : n == 3 ? (unsigned)(*p & 0x0f) : (unsigned)(*p & 0x07);
+        for (unsigned i = 1; i < n; i++) {
+            if (!p[i] || (p[i] & 0xc0) != 0x80) { n = 0; break; }   // cut short by the terminator, or not a continuation
+            cp = (cp << 6) | (p[i] & 0x3f);
+        }
+        if (!n) { p++; continue; }
+        menu_event_char(cp, 1);
+        p += n;
+    }
+}
+
+// Text input (SDL_EVENT_TEXT_INPUT, the typed characters) is on while the menu is open and off while the game runs: the
+// game reads keys, not text, and an IME would otherwise open over a session.
+static void text_input_follow(void) {
+    static int on = -1;
+    bool want = menu_is_open();
+    if ((int)want == on) return;
+    SDL_Window *w = gfx_window_sdl();
+    if (!w) return;
+    // A typed character reaches the handler as an event of its own, after the press that opened the menu, so switching
+    // here loses none of them.
+    if (want) SDL_StartTextInput(w);
+    else SDL_StopTextInput(w);
+    on = want;
+}
+
 extern "C" void menu_sdl_event(const SDL_Event *e) {
     float d = (float)gfx_window_sdl_density();
+    text_input_follow();
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         // Esc with the menu open (opened by F1 too) is not a toggle here: it goes to the menu, which closes itself
@@ -75,6 +109,9 @@ extern "C" void menu_sdl_event(const SDL_Event *e) {
     }
     case SDL_EVENT_MOUSE_WHEEL:
         if (menu_is_open()) menu_event_wheel(e->wheel.x, e->wheel.y);
+        return;
+    case SDL_EVENT_TEXT_INPUT:   // a typed character (not a key: the layout and the modifiers are the system's)
+        if (menu_is_open()) io_add_text(e->text.text);
         return;
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
     case SDL_EVENT_WINDOW_FOCUS_LOST:

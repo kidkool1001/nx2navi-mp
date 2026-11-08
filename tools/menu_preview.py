@@ -2,8 +2,9 @@
 
     python tools/menu_preview.py [--out build/menu-preview] [--font FILE] [--size 1920x1080] [--romfs FOLDER]
 
-Builds tools/menu_preview.cpp with the menu's own row, shape, overlay and text code and Dear ImGui (host clang++, into
-build/menu-preview), runs it for each scene and writes menu.png, overlay.png and boot.png. Without --romfs no game
+Builds tools/menu_preview.cpp with the menu's own row, shape, multiplayer page, overlay and text code and Dear ImGui (host clang++, into
+build/menu-preview), runs it for each scene and writes menu.png, mp.png (the Multiplayer tab), text.png (its text window), hud.png (the multiplayer overlay),
+overlay.png (the performance overlay) and boot.png. Without --romfs no game
 files are read: the window has its plain border in place of the game's ornamented frame and the boxes are plain
 shapes. With --romfs, an extracted RomFS folder, the textures listed in runtime/ui/menu_art.cpp are decoded into --out
 and the boxes look as they do in the game (needs what tools/ui_textures.py needs). The font given (default: DejaVu
@@ -22,7 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / 'runtime'
 SOURCES = [ROOT / 'tools' / 'menu_preview.cpp', RT / 'ui' / 'option_rows.cpp', RT / 'ui' / 'menu_skin.cpp',
-           RT / 'ui' / 'perf_panel.cpp', RT / 'ui_text.c'] + sorted((RT / 'third_party' / 'imgui').glob('imgui*.cpp'))
+           RT / 'ui' / 'mp_page.cpp', RT / 'ui' / 'perf_panel.cpp', RT / 'ui_text.c'] + \
+          sorted((RT / 'third_party' / 'imgui').glob('imgui*.cpp'))
 FONTS = ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 'C:/Windows/Fonts/segoeui.ttf', 'C:/Windows/Fonts/arial.ttf']
 
 
@@ -88,7 +90,7 @@ def main():
     a.out.mkdir(parents=True, exist_ok=True)
     exe = build(a.out)
     art = [str(decode_art(a.romfs, a.out))] if a.romfs else []
-    for scene in ('menu', 'overlay', 'boot'):
+    for scene in ('menu', 'mp', 'text', 'hud', 'overlay', 'boot'):
         raw = a.out / f'{scene}.rgba'
         if subprocess.run([str(exe), font, scene, str(w), str(h), str(raw), *art]).returncode:
             sys.exit(f'the {scene} scene failed')
