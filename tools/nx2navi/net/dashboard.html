@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nx2navi-mp · live session</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121821; --line: #1f2a37; --text: #dbe4ee;
+    --dim: #7d8ea3; --gold: #e3c06a; --green: #62c37a; --red: #d96464; --blue: #6aa8e3;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: radial-gradient(1200px 600px at 20% -10%, #16202c 0%, var(--bg) 60%);
+    color: var(--text); font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+  }
+  header { padding: 20px 24px 12px; display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  h1 span { color: var(--gold); }
+  .sub { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+  main { padding: 0 24px 32px; display: grid; gap: 16px; grid-template-columns: 1.35fr 1fr; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--dim);
+    margin: 0 0 10px; font-weight: 600;
+  }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat b { display: block; font-family: var(--mono); font-size: 20px; color: var(--gold); }
+  .stat span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  td { padding: 4px 6px; border-bottom: 1px solid #17202b; }
+  tr.stale td { color: #55606d; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.off { background: #46525f; }
+  #map { width: 100%; aspect-ratio: 1.15; background: #0a1017; border: 1px solid var(--line); border-radius: 8px; }
+  .feed { font-family: var(--mono); font-size: 11.5px; max-height: 320px; overflow-y: auto; }
+  .feed div { padding: 2px 0; border-bottom: 1px solid #151d26; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t { color: var(--dim); }
+  .k-state { color: var(--blue); }
+  .k-join { color: var(--green); }
+  .k-kick { color: var(--red); }
+  .k-event { color: var(--gold); }
+  footer { padding: 0 24px 28px; color: var(--dim); font-size: 11.5px; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <h1>nx2navi<span>-mp</span> · live session</h1>
+  <div class="sub" id="conn">connecting…</div>
+</header>
+
+<main>
+  <div>
+    <div class="stats">
+      <div class="stat"><b id="s-players">0</b><span>in room</span></div>
+      <div class="stat"><b id="s-uptime">0s</b><span>uptime</span></div>
+      <div class="stat"><b id="s-in">0</b><span>packets in</span></div>
+      <div class="stat"><b id="s-replay">0</b><span>replayed</span></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Peers</h2>
+      <table>
+        <thead><tr><th>#</th><th>name</th><th>x</th><th>z</th><th>room</th><th>age</th><th>miss</th><th>in</th></tr></thead>
+        <tbody id="peers"><tr><td colspan="8" style="color:#55606d">no clients yet — run the simulator or connect a game</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Hyrule field · top-down, world units</h2>
+      <canvas id="map" width="720" height="620"></canvas>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Packet feed</h2>
+    <div class="feed" id="feed"></div>
+  </div>
+</main>
+
+<footer>
+  State packets fan out unreliably; flag and item packets are journalled and replayed to late joiners.
+  <span id="totals"></span>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let snapshot = null;
+let feedRows = [];
+
+function fmtUptime(s) {
+  if (s < 60) return Math.round(s) + "s";
+  const m = Math.floor(s / 60), r = Math.round(s % 60);
+  return m + "m" + String(r).padStart(2, "0") + "s";
+}
+
+function renderPeers(players) {
+  const body = $("peers");
+  if (!players.length) {
+    body.innerHTML = '<tr><td colspan="8" style="color:#55606d">no clients yet — run the simulator or connect a game</td></tr>';
+    return;
+  }
+  body.innerHTML = players.map(p => {
+    const s = p.state || {};
+    return `<tr class="${p.alive ? "" : "stale"}">
+      <td>${p.id}</td>
+      <td><span class="dot ${p.alive ? "on" : "off"}"></span>${p.name}</td>
+      <td>${s.x ?? "—"}</td>
+      <td>${s.z ?? "—"}</td>
+      <td>${s.room ?? "—"}</td>
+      <td>${s.age === 1 ? "adult" : s.age === 0 ? "child" : "—"}</td>
+      <td>${p.dropped}</td>
+      <td>${p.packets_in}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderFeed(feed) {
+  const el = $("feed");
+  el.innerHTML = feed.slice().reverse().map(e => {
+    const kind = e.kind || (e.type === "PLAYER_STATE" ? "state" : "event");
+    const t = e.t ? new Date(e.t * 1000).toLocaleTimeString() : "";
+    let detail = e.type || "";
+    if (e.type === "PLAYER_STATE") detail = `state  #${e.from} x=${e.pos_x} z=${e.pos_z} anim=${e.anim_id} seq=${e.seq}`;
+    else if (e.type === "FLAG_SET") detail = `flag   #${e.from} scene=${e.scene_id} idx=${e.index} bits=0x${(e.bitfield >>> 0).toString(16)}`;
+    else if (e.type === "ITEM_GIVE") detail = `item   #${e.from} id=0x${(e.item_id ?? 0).toString(16)} +${e.delta}`;
+    else if (e.kind === "join") detail = `join   #${e.id} ${e.name}`;
+    else if (e.kind === "kick") detail = `kick   #${e.id}`;
+    return `<div><span class="t">${t}</span> · <span class="k-${kind}">${detail}</span></div>`;
+  }).join("");
+}
+
+const ctx = () => $("map").getContext("2d");
+
+function renderMap(players) {
+  const c = $("map"), g = ctx();
+  const W = c.width, H = c.height, scale = 0.55, cx = W / 2, cy = H / 2;
+  g.fillStyle = "#0a1017"; g.fillRect(0, 0, W, H);
+
+  // Reference grid in world units, so a position on this canvas means something.
+  g.strokeStyle = "#141d27"; g.lineWidth = 1;
+  for (let r = 200; r <= 1800; r += 200) {
+    g.beginPath(); g.arc(cx, cy, r * scale, 0, Math.PI * 2); g.stroke();
+  }
+  g.fillStyle = "#2a3644"; g.font = "11px ui-monospace, monospace";
+  g.fillText("0", cx + 4, cy - 4);
+
+  // The castle town block, as a fixed landmark to orient against.
+  g.fillStyle = "#141f16";
+  g.fillRect(cx - 30, cy - 190, 60, 60);
+  g.fillStyle = "#3c5a41"; g.fillText("castle town", cx - 34, cy - 198);
+
+  const colors = ["#e3c06a", "#6aa8e3", "#62c37a", "#d96464", "#b98ce0", "#e0925f"];
+  players.forEach((p, i) => {
+    const s = p.state; if (!s) return;
+    const x = cx + s.x * scale, y = cy + s.z * scale;
+    const col = colors[(p.id - 1) % colors.length];
+    g.beginPath(); g.arc(x, y, 7, 0, Math.PI * 2);
+    g.fillStyle = p.alive ? col : "#3c4652"; g.fill();
+    // Facing marker from the yaw, so rotation bugs are visible on screen.
+    const a = (s.yaw / 65536) * Math.PI * 2 - Math.PI / 2;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * 18, y + Math.sin(a) * 18);
+    g.strokeStyle = col; g.lineWidth = 2; g.stroke();
+    g.fillStyle = "#c9d5e2"; g.font = "11px ui-monospace, monospace";
+    g.fillText(`#${p.id} ${p.name}`, x + 11, y - 8);
+  });
+}
+
+function applySnap(snap) {
+  if (!snap) return;
+  snapshot = snap;
+  $("conn").textContent = `live · udp relay · ${snap.room_size} peer(s)`;
+  $("s-players").textContent = snap.room_size;
+  $("s-uptime").textContent = fmtUptime(snap.uptime_s);
+  $("s-in").textContent = snap.totals.in;
+  $("s-replay").textContent = snap.totals.replayed;
+  $("totals").textContent = ` in=${snap.totals.in} out=${snap.totals.out} events=${snap.totals.events} bad=${snap.totals.bad} journal=${snap.journal}`;
+  renderPeers(snap.players);
+  renderFeed(snap.feed || []);
+  renderMap(snap.players);
+}
+
+let ws = null, pollTimer = null, wsFails = 0;
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  try { ws = new WebSocket(`${proto}//${location.host}/`); } catch (e) { return poll(); }
+  ws.onopen = () => { wsFails = 0; };
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.players) applySnap(msg);
+  };
+  ws.onclose = () => {
+    $("conn").textContent = "disconnected — polling";
+    wsFails++;
+    setTimeout(wsFails < 3 ? connect : poll, 1200);
+  };
+  ws.onerror = () => {};
+}
+
+function poll() {
+  // Plain HTTP fallback: works through any proxy that breaks Upgrade.
+  clearInterval(pollTimer);
+  const tick = async () => {
+    try {
+      const r = await fetch("/snapshot.json", { cache: "no-store" });
+      applySnap(await r.json());
+      $("conn").textContent = "live · polling";
+    } catch { $("conn").textContent = "server unreachable"; }
+  };
+  tick();
+  pollTimer = setInterval(tick, 1000);
+}
+
+connect();
+</script>
+</body>
+</html>
